@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebCodecs Video Decoder Demo</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            line-height: 1.6;
+        }
+        h1 {
+            color: #333;
+        }
+        .container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+        .controls {
+            background-color: #f5f5f5;
+            padding: 15px;
+            border-radius: 5px;
+        }
+        #videoCanvas {
+            border: 1px solid #ddd;
+            background-color: #000;
+        }
+        .status {
+            background-color: #e9f7fd;
+            padding: 10px;
+            border-radius: 5px;
+            min-height: 20px;
+        }
+        button {
+            padding: 8px 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <h1>WebCodecs Video Decoder Demo</h1>
+    
+    <div class="container">
+        <div class="controls">
+            <input type="file" id="videoInput" accept="video/*">
+            <button id="decodeButton">Decode Video</button>
+            <button id="playButton" disabled>Play Decoded Frames</button>
+            <button id="pauseButton" disabled>Pause</button>
+        </div>
+        
+        <canvas id="videoCanvas" width="640" height="360"></canvas>
+        
+        <div class="status" id="statusText">Select a video file to begin.</div>
+    </div>
+
+    <script>
+        // Check if WebCodecs is supported
+        if (!('VideoDecoder' in window)) {
+            document.getElementById('statusText').textContent = 
+                'WebCodecs is not supported in your browser. Try Chrome 94+ or Edge 94+.';
+            document.getElementById('decodeButton').disabled = true;
+        }
+
+        // Global variables
+        let videoDecoder = null;
+        let videoFrames = [];
+        let currentFrameIndex = 0;
+        let isPlaying = false;
+        let playInterval = null;
+        
+        // Get DOM elements
+        const videoInput = document.getElementById('videoInput');
+        const decodeButton = document.getElementById('decodeButton');
+        const playButton = document.getElementById('playButton');
+        const pauseButton = document.getElementById('pauseButton');
+        const videoCanvas = document.getElementById('videoCanvas');
+        const statusText = document.getElementById('statusText');
+        const ctx = videoCanvas.getContext('2d');
+        
+        // Set up event listeners
+        decodeButton.addEventListener('click', decodeVideo);
+        playButton.addEventListener('click', playDecodedFrames);
+        pauseButton.addEventListener('click', pausePlayback);
+        
+        // Function to decode the selected video
+        async function decodeVideo() {
+            // Reset state
+            resetState();
+            
+            const file = videoInput.files[0];
+            if (!file) {
+                statusText.textContent = 'Please select a video file first.';
+                return;
+            }
+            
+            try {
+                statusText.textContent = 'Reading file...';
+                const fileData = await file.arrayBuffer();
+                
+                statusText.textContent = 'Creating decoder...';
+                
+                // Initialize the VideoDecoder
+                videoDecoder = new VideoDecoder({
+                    output: handleDecodedFrame,
+                    error: (e) => {
+                        statusText.textContent = `Decoding error: ${e.message}`;
+                        console.error('Decoder error', e);
+                    }
+                });
+                
+                // Configure the decoder (for webm/vp8)
+                videoDecoder.configure({
+                    codec: 'vp8'
+                });
+                
+                // Create a more proper chunking mechanism
+                // This is a simplified example - in production, you'd need proper demuxing
+                const chunkSize = 32 * 1024; // 32KB chunks
+                for (let offset = 0; offset < fileData.byteLength; offset += chunkSize) {
+                    const chunk = new EncodedVideoChunk({
+                        type: offset === 0 ? 'key' : 'delta', // First chunk as key frame
+                        data: new Uint8Array(fileData.slice(offset, 
+                            Math.min(offset + chunkSize, fileData.byteLength))),
+                        timestamp: offset * 1000 // microseconds
+                    });
+                    videoDecoder.decode(chunk);
+                }
+                
+                // Close the decoder after a short delay
+                // (In a real app, you'd properly drain the decoder)
+                setTimeout(() => {
+                    if (videoDecoder && videoDecoder.state !== 'closed') {
+                        videoDecoder.close();
+                        statusText.textContent = `Decoded ${videoFrames.length} frames. Ready to play.`;
+                        
+                        if (videoFrames.length > 0) {
+                            playButton.disabled = false;
+                            // Display the first frame
+                            displayFrame(0);
+                        } else {
+                            statusText.textContent = 'No frames were decoded. Try a different video format (WebM/VP8 recommended).';
+                        }
+                    }
+                }, 1000);
+                
+            } catch (e) {
+                statusText.textContent = `Error: ${e.message}`;
+                console.error('Error decoding video', e);
+            }
+        }
+        
+        // Function to handle decoded video frames
+        function handleDecodedFrame(frame) {
+            // Store the frame for later display
+            videoFrames.push(frame);
+            
+            // Display progress
+            statusText.textContent = `Decoded ${videoFrames.length} frames...`;
+            
+            // We need to make a copy since the original frame will be closed
+            // In a real application, you might want to be more efficient
+            const canvas = new OffscreenCanvas(frame.displayWidth, frame.displayHeight);
+            const ctx = canvas.getContext('2d');
+            ctx.drawImage(frame, 0, 0);
+            
+            // Store the frame data
+            videoFrames[videoFrames.length - 1] = {
+                bitmap: canvas,
+                timestamp: frame.timestamp,
+                duration: frame.duration || 33333, // ~30fps if duration is not available
+                width: frame.displayWidth,
+                height: frame.displayHeight
+            };
+            
+            // Close the original frame to free up resources
+            frame.close();
+        }
+        
+        // Function to display a specific frame
+        function displayFrame(index) {
+            if (index >= 0 && index < videoFrames.length) {
+                const frame = videoFrames[index];
+                
+                // Resize canvas if needed
+                if (videoCanvas.width !== frame.width || videoCanvas.height !== frame.height) {
+                    videoCanvas.width = frame.width;
+                    videoCanvas.height = frame.height;
+                }
+                
+                // Draw the frame on the canvas
+                ctx.drawImage(frame.bitmap, 0, 0);
+                currentFrameIndex = index;
+            }
+        }
+        
+        // Function to play decoded frames
+        function playDecodedFrames() {
+            if (videoFrames.length === 0) return;
+            
+            isPlaying = true;
+            playButton.disabled = true;
+            pauseButton.disabled = false;
+            
+            // Start from current frame or loop back to beginning
+            if (currentFrameIndex >= videoFrames.length - 1) {
+                currentFrameIndex = 0;
+            }
+            
+            // Clear any existing interval
+            if (playInterval) clearInterval(playInterval);
+            
+            // Set up an interval to display frames (approximating the original frame rate)
+            playInterval = setInterval(() => {
+                displayFrame(currentFrameIndex);
+                currentFrameIndex++;
+                
+                // Loop back to the beginning when we reach the end
+                if (currentFrameIndex >= videoFrames.length) {
+                    currentFrameIndex = 0;
+                }
+            }, 33); // ~30fps
+        }
+        
+        // Function to pause playback
+        function pausePlayback() {
+            isPlaying = false;
+            playButton.disabled = false;
+            pauseButton.disabled = true;
+            
+            if (playInterval) {
+                clearInterval(playInterval);
+                playInterval = null;
+            }
+        }
+        
+        // Function to reset the state
+        function resetState() {
+            // Clear any existing frames
+            videoFrames = [];
+            currentFrameIndex = 0;
+            
+            // Stop playback if it's running
+            if (isPlaying) {
+                pausePlayback();
+            }
+            
+            // Close existing decoder if any
+            if (videoDecoder && videoDecoder.state !== 'closed') {
+                videoDecoder.close();
+            }
+            
+            // Reset buttons
+            playButton.disabled = true;
+            pauseButton.disabled = true;
+            
+            // Clear the canvas
+            ctx.clearRect(0, 0, videoCanvas.width, videoCanvas.height);
+        }
+    </script>
+</body>
+</html>
